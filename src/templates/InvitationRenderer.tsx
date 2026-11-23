@@ -802,7 +802,7 @@ export const InvitationRenderer: React.FC<InvitationRendererProps> = ({
               {isPersonalCard ? t.rsvpLoveHeading : t.rsvpHeading}
             </h2>
             <p className="mt-1 text-center text-xs" style={{ color: palette.muted }}>
-              {t.rsvpSubtitle}
+              {isPersonalCard ? t.rsvpPersonalSubtitle : t.rsvpSubtitle}
             </p>
 
             {quizPercent !== null && (
@@ -842,77 +842,79 @@ export const InvitationRenderer: React.FC<InvitationRendererProps> = ({
                   />
                 </div>
 
-                {!isLoveTemplate && (
-                  <div>
-                    <label className="mb-1 block text-xs font-medium" style={{ color: palette.muted }}>
-                      {t.guestPhone}
-                    </label>
-                    <input
-                      type="tel"
-                      value={phone}
-                      onChange={(e) => setPhone(e.target.value)}
-                      placeholder="+998 90 ..."
-                      className="w-full rounded-xl px-3.5 py-2.5 text-sm outline-none transition"
-                      style={{
-                        backgroundColor: palette.surface,
-                        border: `1px solid ${borderColor}`,
-                        color: palette.text,
-                      }}
-                    />
-                  </div>
-                )}
+                {!isPersonalCard && (
+                  <>
+                    <div>
+                      <label className="mb-1 block text-xs font-medium" style={{ color: palette.muted }}>
+                        {t.guestPhone}
+                      </label>
+                      <input
+                        type="tel"
+                        value={phone}
+                        onChange={(e) => setPhone(e.target.value)}
+                        placeholder="+998 90 ..."
+                        className="w-full rounded-xl px-3.5 py-2.5 text-sm outline-none transition"
+                        style={{
+                          backgroundColor: palette.surface,
+                          border: `1px solid ${borderColor}`,
+                          color: palette.text,
+                        }}
+                      />
+                    </div>
 
-                <div>
-                  <label className="mb-1.5 block text-xs font-medium" style={{ color: palette.muted }}>
-                    {t.attendance}
-                  </label>
-                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-                    {(
-                      [
-                        { id: 'yes', label: t.attYes },
-                        { id: 'maybe', label: t.attMaybe },
-                        { id: 'no', label: t.attNo },
-                      ] as const
-                    ).map((opt) => {
-                      const active = attendance === opt.id;
-                      return (
-                        <button
-                          key={opt.id}
-                          type="button"
-                          onClick={() => setAttendance(opt.id)}
-                          className="rounded-xl px-2 py-2.5 text-xs font-medium transition"
+                    <div>
+                      <label className="mb-1.5 block text-xs font-medium" style={{ color: palette.muted }}>
+                        {t.attendance}
+                      </label>
+                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                        {(
+                          [
+                            { id: 'yes', label: t.attYes },
+                            { id: 'maybe', label: t.attMaybe },
+                            { id: 'no', label: t.attNo },
+                          ] as const
+                        ).map((opt) => {
+                          const active = attendance === opt.id;
+                          return (
+                            <button
+                              key={opt.id}
+                              type="button"
+                              onClick={() => setAttendance(opt.id)}
+                              className="rounded-xl px-2 py-2.5 text-xs font-medium transition"
+                              style={{
+                                backgroundColor: active ? palette.primary : palette.surface,
+                                color: active ? (isDark ? '#111113' : '#FFFFFF') : palette.text,
+                                border: `1px solid ${active ? palette.primary : borderColor}`,
+                              }}
+                            >
+                              {opt.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {attendance !== 'no' && (
+                      <div>
+                        <label className="mb-1 block text-xs font-medium" style={{ color: palette.muted }}>
+                          {t.guestsCount}
+                        </label>
+                        <input
+                          type="number"
+                          min={1}
+                          max={15}
+                          value={guestsCount}
+                          onChange={(e) => setGuestsCount(Math.max(1, Number(e.target.value) || 1))}
+                          className="w-28 rounded-xl px-3.5 py-2 text-sm outline-none"
                           style={{
-                            backgroundColor: active ? palette.primary : palette.surface,
-                            color: active ? (isDark ? '#111113' : '#FFFFFF') : palette.text,
-                            border: `1px solid ${active ? palette.primary : borderColor}`,
+                            backgroundColor: palette.surface,
+                            border: `1px solid ${borderColor}`,
+                            color: palette.text,
                           }}
-                        >
-                          {opt.label}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                {!isLoveTemplate && attendance !== 'no' && (
-                  <div>
-                    <label className="mb-1 block text-xs font-medium" style={{ color: palette.muted }}>
-                      {t.guestsCount}
-                    </label>
-                    <input
-                      type="number"
-                      min={1}
-                      max={15}
-                      value={guestsCount}
-                      onChange={(e) => setGuestsCount(Math.max(1, Number(e.target.value) || 1))}
-                      className="w-28 rounded-xl px-3.5 py-2 text-sm outline-none"
-                      style={{
-                        backgroundColor: palette.surface,
-                        border: `1px solid ${borderColor}`,
-                        color: palette.text,
-                      }}
-                    />
-                  </div>
+                        />
+                      </div>
+                    )}
+                  </>
                 )}
 
                 <div>
