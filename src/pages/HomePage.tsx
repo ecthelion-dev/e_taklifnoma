@@ -504,10 +504,15 @@ export const HomePage: React.FC = () => {
 
       {/* FOOTER */}
       <footer className="border-t border-stone-200 bg-[#FAF8F5] py-6 sm:py-8">
-        <div className="mx-auto flex max-w-7xl items-center justify-between px-4 text-xs text-stone-500 sm:px-6 lg:px-8">
+        <div className="mx-auto flex max-w-7xl flex-col items-center justify-between gap-3 px-4 text-xs text-stone-500 sm:flex-row sm:px-6 lg:px-8">
           <div className="flex items-center gap-2">
             <Sparkles className="h-4 w-4 text-emerald-900" />
             <span className="font-serif-display text-lg font-bold text-stone-900">{t.brand}</span>
+            <span>•</span>
+            <span>
+              {lang === 'ru' ? 'Разработчик:' : 'Dasturchi:'}{' '}
+              <strong className="font-semibold text-stone-800">Farrux</strong>
+            </span>
           </div>
           <div className="flex items-center gap-4">
             <Link to="/create" className="hover:text-stone-900">
