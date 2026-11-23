@@ -307,7 +307,7 @@ export const HomePage: React.FC = () => {
                       {renderCardOrnament(tpl.id, pal.primary, pal.accent, pal.muted)}
 
                       <p className="line-clamp-1 font-serif-display text-base font-bold sm:text-2xl" style={{ color: pal.primary }}>
-                        {tpl.previewNames}
+                        {lang === 'ru' ? tpl.previewNamesRu : tpl.previewNames}
                       </p>
 
                       <div className="mt-2 hidden items-center justify-center gap-1.5 sm:mt-3 sm:flex">
@@ -427,8 +427,12 @@ export const HomePage: React.FC = () => {
             <div className="hidden lg:col-span-4 lg:flex lg:justify-end">
               <div className="w-60 rounded-3xl border border-rose-200/20 bg-white/10 p-5 text-center backdrop-blur-md">
                 <LoveSealOrnament color="#FDA4AF" accent="#FB7185" className="mx-auto h-14 w-44" />
-                <p className="mt-2 font-serif-display text-2xl font-bold text-white">Jasur ❤️ Nigora</p>
-                <p className="mt-1 text-xs text-rose-200/80">100% moslik natijasi</p>
+                <p className="mt-2 font-serif-display text-2xl font-bold text-white">
+                  {lang === 'ru' ? 'Тимур ❤️ Алина' : 'Jasur ❤️ Nigora'}
+                </p>
+                <p className="mt-1 text-xs text-rose-200/80">
+                  {lang === 'ru' ? '100% совпадение' : '100% moslik natijasi'}
+                </p>
               </div>
             </div>
           </div>

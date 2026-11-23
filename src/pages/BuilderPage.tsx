@@ -91,6 +91,46 @@ export const BuilderPage: React.FC = () => {
     setForm((prev) => ({ ...prev, [key]: value }));
   };
 
+  const switchFormLanguage = (nextLang: Lang) => {
+    setForm((prev) => {
+      if (prev.lang === nextLang) return prev;
+      if (isEditing) return { ...prev, lang: nextLang };
+
+      const oldDef = createDefaultInvitation(prev.templateId, prev.lang);
+      const newDef = createDefaultInvitation(prev.templateId, nextLang);
+
+      const swap = (val: string, oldDefault: string, newDefault: string) =>
+        val.trim() === oldDefault.trim() ? newDefault : val;
+
+      const programMatchesDefault =
+        JSON.stringify(prev.program) === JSON.stringify(oldDef.program);
+      const quizMatchesDefault =
+        JSON.stringify(prev.quiz) === JSON.stringify(oldDef.quiz);
+
+      return {
+        ...prev,
+        lang: nextLang,
+        title: swap(prev.title, oldDef.title, newDef.title),
+        heroNames: swap(prev.heroNames, oldDef.heroNames, newDef.heroNames),
+        hostLine: swap(prev.hostLine, oldDef.hostLine, newDef.hostLine),
+        welcomeText: swap(prev.welcomeText, oldDef.welcomeText, newDef.welcomeText),
+        quoteText: swap(prev.quoteText, oldDef.quoteText, newDef.quoteText),
+        venueName: swap(prev.venueName, oldDef.venueName, newDef.venueName),
+        venueAddress: swap(prev.venueAddress, oldDef.venueAddress, newDef.venueAddress),
+        dressCode: swap(prev.dressCode, oldDef.dressCode, newDef.dressCode),
+        program: programMatchesDefault ? newDef.program : prev.program,
+        quiz: quizMatchesDefault ? newDef.quiz : prev.quiz,
+      };
+    });
+  };
+
+  // Sync builder content language when user switches global UZ/RU navbar toggle
+  useEffect(() => {
+    if (!isEditing) {
+      switchFormLanguage(lang);
+    }
+  }, [lang, isEditing]);
+
   const handleSelectTemplate = (tplId: TemplateId) => {
     if (!isEditing) {
       // Fresh smart template defaults when creating new invitation
@@ -528,7 +568,7 @@ export const BuilderPage: React.FC = () => {
                         <button
                           key={l}
                           type="button"
-                          onClick={() => updateField('lang', l)}
+                          onClick={() => switchFormLanguage(l)}
                           className={`rounded-xl border py-2.5 text-xs font-semibold transition ${
                             form.lang === l
                               ? 'border-emerald-900 bg-emerald-950 text-white'
@@ -739,7 +779,7 @@ export const BuilderPage: React.FC = () => {
                             type="text"
                             value={item.title}
                             onChange={(e) => updateProgramItem(item.id, 'title', e.target.value)}
-                            placeholder="Bosqich nomi"
+                            placeholder={lang === 'ru' ? 'Название этапа' : 'Bosqich nomi'}
                             className="flex-1 rounded-lg border border-stone-200 bg-white px-2.5 py-1.5 text-xs font-semibold outline-none"
                           />
                           <button
@@ -754,7 +794,7 @@ export const BuilderPage: React.FC = () => {
                           type="text"
                           value={item.description || ''}
                           onChange={(e) => updateProgramItem(item.id, 'description', e.target.value)}
-                          placeholder="Qisqa izoh (ixtiyoriy)"
+                          placeholder={lang === 'ru' ? 'Краткое описание (необязательно)' : 'Qisqa izoh (ixtiyoriy)'}
                           className="mt-2 w-full rounded-lg border border-stone-200 bg-white px-2.5 py-1.5 text-xs outline-none"
                         />
                       </div>
@@ -791,7 +831,7 @@ export const BuilderPage: React.FC = () => {
                             type="text"
                             value={q.question}
                             onChange={(e) => updateQuizQuestion(q.id, e.target.value)}
-                            placeholder="Savol matni..."
+                            placeholder={lang === 'ru' ? 'Текст вопроса...' : 'Savol matni...'}
                             className="flex-1 rounded-lg border border-stone-200 bg-white px-2.5 py-1.5 text-xs font-semibold outline-none"
                           />
                           <button
@@ -818,7 +858,7 @@ export const BuilderPage: React.FC = () => {
                                 type="text"
                                 value={opt}
                                 onChange={(e) => updateQuizOption(q.id, optIdx, e.target.value)}
-                                placeholder={`Variant ${optIdx + 1}`}
+                                placeholder={lang === 'ru' ? `Вариант ${optIdx + 1}` : `Variant ${optIdx + 1}`}
                                 className="flex-1 rounded-lg border border-stone-200 bg-white px-2.5 py-1.5 text-xs outline-none"
                               />
                             </div>
