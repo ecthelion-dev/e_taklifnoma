@@ -121,7 +121,16 @@
 }
 
 .animate-ambient-fall {
+  will-change: transform, opacity;
   animation: ambientFall var(--dur, 10s) linear var(--delay, 0s) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-float-slow,
+  .animate-seal-pulse,
+  .animate-ambient-fall {
+    animation: none;
+  }
 }
 
 /* 3D Envelope helpers */

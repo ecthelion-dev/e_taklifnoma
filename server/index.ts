@@ -20,7 +20,7 @@ const SESSION_COOKIE = 'etaklif_session';
 app.use(cors({ origin: true, credentials: true }));
 app.use(cookieParser());
 app.use(express.json({ limit: '6mb' }));
-app.use('/uploads', express.static(UPLOADS_DIR));
+app.use('/uploads', express.static(UPLOADS_DIR, { maxAge: '30d' }));
 
 // --- Helpers ---
 function hashPassword(password: string): string {
@@ -650,11 +650,66 @@ app.delete('/api/invitations/:slug/rsvps/:id', (req, res) => {
   res.json({ ok: true });
 });
 
-// --- Serve Built SPA in Production ---
+// --- Serve Built SPA in Production with Dynamic Telegram/OG Meta Tags ---
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 if (fs.existsSync(DIST_DIR)) {
-  app.use(express.static(DIST_DIR));
+  const indexHtmlPath = path.join(DIST_DIR, 'index.html');
+  const cachedIndexHtml = fs.existsSync(indexHtmlPath) ? fs.readFileSync(indexHtmlPath, 'utf-8') : '';
+
+  app.use('/assets', express.static(path.join(DIST_DIR, 'assets'), { maxAge: '1y', immutable: true }));
+  app.use(express.static(DIST_DIR, { maxAge: '1h' }));
+
+  // Dynamic OpenGraph tags for Telegram / WhatsApp link previews on /i/:slug
+  app.get('/i/:slug', (req, res) => {
+    if (!cachedIndexHtml) {
+      res.sendFile(indexHtmlPath);
+      return;
+    }
+    const row = db
+      .prepare('SELECT title, hero_names, host_line, welcome_text, venue_name, photo_url FROM invitations WHERE slug = ?')
+      .get(req.params.slug) as
+      | { title: string; hero_names: string; host_line: string; welcome_text: string; venue_name: string; photo_url: string }
+      | undefined;
+
+    if (!row) {
+      res.type('html').send(cachedIndexHtml);
+      return;
+    }
+
+    const ogTitle = escapeHtml(`${row.hero_names} — ${row.title}`);
+    const descSource = row.host_line || row.venue_name || row.welcome_text || 'eTaklif — Elektron taklifnoma';
+    const ogDesc = escapeHtml(descSource.slice(0, 180));
+    const origin = `${req.protocol}://${req.get('host')}`;
+    const ogImageTag = row.photo_url
+      ? `<meta property="og:image" content="${escapeHtml(row.photo_url.startsWith('http') ? row.photo_url : `${origin}${row.photo_url}`)}" />`
+      : '';
+
+    const metaInjection = `
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="${ogTitle}" />
+    <meta property="og:description" content="${ogDesc}" />
+    ${ogImageTag}
+    <meta name="twitter:card" content="summary_large_image" />
+  </head>`;
+
+    const html = cachedIndexHtml
+      .replace(/<title>.*?<\/title>/, `<title>${ogTitle} | eTaklif</title>`)
+      .replace('</head>', metaInjection);
+
+    res.setHeader('Cache-Control', 'no-cache');
+    res.type('html').send(html);
+  });
+
   app.get('/{*splat}', (_req, res) => {
-    res.sendFile(path.join(DIST_DIR, 'index.html'));
+    res.setHeader('Cache-Control', 'no-cache');
+    res.type('html').send(cachedIndexHtml);
   });
 }
 

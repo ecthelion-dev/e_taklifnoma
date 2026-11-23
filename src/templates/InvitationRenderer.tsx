@@ -347,7 +347,13 @@ export const InvitationRenderer: React.FC<InvitationRendererProps> = ({
 
             {data.photoUrl && (
               <div className="my-7 overflow-hidden rounded-2xl" style={{ border: `1px solid ${palette.accent}44` }}>
-                <img src={data.photoUrl} alt={data.heroNames} className="h-64 w-full object-cover sm:h-72" />
+                <img
+                  src={data.photoUrl}
+                  alt={data.heroNames}
+                  loading="lazy"
+                  decoding="async"
+                  className="h-64 w-full object-cover sm:h-72"
+                />
               </div>
             )}
 

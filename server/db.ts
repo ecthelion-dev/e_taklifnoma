@@ -17,6 +17,8 @@ export const db = new DatabaseSync(path.join(DATA_DIR, 'etaklif.db'));
 
 db.exec(`
   PRAGMA foreign_keys = ON;
+  PRAGMA journal_mode = WAL;
+  PRAGMA synchronous = NORMAL;
 
   CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -89,6 +91,12 @@ function ensureColumn(table: string, column: string, definition: string) {
 
 ensureColumn('invitations', 'quiz_json', `TEXT DEFAULT '[]'`);
 ensureColumn('rsvps', 'quiz_score', `INTEGER DEFAULT NULL`);
+
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_invitations_user_id ON invitations(user_id);
+  CREATE INDEX IF NOT EXISTS idx_invitations_edit_token ON invitations(edit_token);
+  CREATE INDEX IF NOT EXISTS idx_rsvps_invitation_id ON rsvps(invitation_id);
+`);
 
 function futureDate(daysAhead: number): string {
   const d = new Date();
