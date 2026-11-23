@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
+import { Pool } from 'pg';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -8,95 +9,60 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT_DIR = path.resolve(__dirname, '..');
 const DATA_DIR = path.join(ROOT_DIR, 'data');
-export const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
 
-fs.mkdirSync(DATA_DIR, { recursive: true });
-fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+export const isPostgres = Boolean(process.env.DATABASE_URL);
 
-export const db = new DatabaseSync(path.join(DATA_DIR, 'etaklif.db'));
+let pgPool: Pool | null = null;
+let sqliteDb: DatabaseSync | null = null;
 
-db.exec(`
-  PRAGMA foreign_keys = ON;
-  PRAGMA journal_mode = WAL;
-  PRAGMA synchronous = NORMAL;
-
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    email TEXT NOT NULL UNIQUE,
-    password_hash TEXT NOT NULL,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
-  );
-
-  CREATE TABLE IF NOT EXISTS sessions (
-    token TEXT PRIMARY KEY,
-    user_id INTEGER NOT NULL,
-    expires_at TEXT NOT NULL,
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-  );
-
-  CREATE TABLE IF NOT EXISTS invitations (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    slug TEXT NOT NULL UNIQUE,
-    user_id INTEGER,
-    edit_token TEXT NOT NULL,
-    template_id TEXT NOT NULL,
-    palette_id TEXT NOT NULL,
-    event_type TEXT NOT NULL,
-    lang TEXT NOT NULL DEFAULT 'uz',
-    title TEXT NOT NULL,
-    hero_names TEXT NOT NULL,
-    host_line TEXT DEFAULT '',
-    welcome_text TEXT DEFAULT '',
-    event_date TEXT NOT NULL,
-    event_time TEXT NOT NULL,
-    venue_name TEXT NOT NULL,
-    venue_address TEXT DEFAULT '',
-    map_url TEXT DEFAULT '',
-    dress_code TEXT DEFAULT '',
-    contact_phone TEXT DEFAULT '',
-    show_bismillah INTEGER DEFAULT 0,
-    quote_text TEXT DEFAULT '',
-    photo_url TEXT DEFAULT '',
-    program_json TEXT DEFAULT '[]',
-    quiz_json TEXT DEFAULT '[]',
-    views_count INTEGER DEFAULT 0,
-    is_demo INTEGER DEFAULT 0,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS rsvps (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    invitation_id INTEGER NOT NULL,
-    guest_name TEXT NOT NULL,
-    phone TEXT DEFAULT '',
-    attendance TEXT NOT NULL CHECK(attendance IN ('yes', 'no', 'maybe')),
-    guests_count INTEGER DEFAULT 1,
-    wish_message TEXT DEFAULT '',
-    quiz_score INTEGER DEFAULT NULL,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (invitation_id) REFERENCES invitations(id) ON DELETE CASCADE
-  );
-`);
-
-// Safe migrations for existing databases
-function ensureColumn(table: string, column: string, definition: string) {
-  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
-  if (!cols.some((c) => c.name === column)) {
-    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
-  }
+if (isPostgres) {
+  pgPool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: { rejectUnauthorized: false },
+  });
+  console.log('Database mode: PostgreSQL (Neon)');
+} else {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  sqliteDb = new DatabaseSync(path.join(DATA_DIR, 'etaklif.db'));
+  sqliteDb.exec(`
+    PRAGMA foreign_keys = ON;
+    PRAGMA journal_mode = WAL;
+    PRAGMA synchronous = NORMAL;
+  `);
+  console.log('Database mode: Local SQLite');
 }
 
-ensureColumn('invitations', 'quiz_json', `TEXT DEFAULT '[]'`);
-ensureColumn('rsvps', 'quiz_score', `INTEGER DEFAULT NULL`);
+function toPgParams(sql: string): string {
+  let idx = 0;
+  return sql.replace(/\?/g, () => `$${++idx}`);
+}
 
-db.exec(`
-  CREATE INDEX IF NOT EXISTS idx_invitations_user_id ON invitations(user_id);
-  CREATE INDEX IF NOT EXISTS idx_invitations_edit_token ON invitations(edit_token);
-  CREATE INDEX IF NOT EXISTS idx_rsvps_invitation_id ON rsvps(invitation_id);
-`);
+export const db = {
+  async query<T = Record<string, unknown>>(sql: string, params: unknown[] = []): Promise<T[]> {
+    if (pgPool) {
+      const res = await pgPool.query(toPgParams(sql), params);
+      return res.rows as T[];
+    }
+    return sqliteDb!.prepare(sql).all(...(params as (string | number | null)[])) as T[];
+  },
+
+  async get<T = Record<string, unknown>>(sql: string, params: unknown[] = []): Promise<T | undefined> {
+    if (pgPool) {
+      const res = await pgPool.query(toPgParams(sql), params);
+      return res.rows[0] as T | undefined;
+    }
+    return sqliteDb!.prepare(sql).get(...(params as (string | number | null)[])) as T | undefined;
+  },
+
+  async run(sql: string, params: unknown[] = []): Promise<{ changes: number }> {
+    if (pgPool) {
+      const res = await pgPool.query(toPgParams(sql), params);
+      return { changes: res.rowCount ?? 0 };
+    }
+    const res = sqliteDb!.prepare(sql).run(...(params as (string | number | null)[]));
+    return { changes: Number(res.changes || 0) };
+  },
+};
 
 function futureDate(daysAhead: number): string {
   const d = new Date();
@@ -104,7 +70,156 @@ function futureDate(daysAhead: number): string {
   return d.toISOString().slice(0, 10);
 }
 
-function seedDemoInvitations() {
+export async function initDatabase() {
+  if (pgPool) {
+    await pgPool.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        email TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS sessions (
+        token TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        expires_at TIMESTAMPTZ NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS invitations (
+        id SERIAL PRIMARY KEY,
+        slug TEXT NOT NULL UNIQUE,
+        user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        edit_token TEXT NOT NULL,
+        template_id TEXT NOT NULL,
+        palette_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        lang TEXT NOT NULL DEFAULT 'uz',
+        title TEXT NOT NULL,
+        hero_names TEXT NOT NULL,
+        host_line TEXT DEFAULT '',
+        welcome_text TEXT DEFAULT '',
+        event_date TEXT DEFAULT '',
+        event_time TEXT DEFAULT '',
+        venue_name TEXT DEFAULT '',
+        venue_address TEXT DEFAULT '',
+        map_url TEXT DEFAULT '',
+        dress_code TEXT DEFAULT '',
+        contact_phone TEXT DEFAULT '',
+        show_bismillah INTEGER DEFAULT 0,
+        quote_text TEXT DEFAULT '',
+        photo_url TEXT DEFAULT '',
+        program_json TEXT DEFAULT '[]',
+        quiz_json TEXT DEFAULT '[]',
+        views_count INTEGER DEFAULT 0,
+        is_demo INTEGER DEFAULT 0,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS rsvps (
+        id SERIAL PRIMARY KEY,
+        invitation_id INTEGER NOT NULL REFERENCES invitations(id) ON DELETE CASCADE,
+        guest_name TEXT NOT NULL,
+        phone TEXT DEFAULT '',
+        attendance TEXT NOT NULL CHECK(attendance IN ('yes', 'no', 'maybe')),
+        guests_count INTEGER DEFAULT 1,
+        wish_message TEXT DEFAULT '',
+        quiz_score INTEGER DEFAULT NULL,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS media (
+        id TEXT PRIMARY KEY,
+        mime_type TEXT NOT NULL,
+        data_base64 TEXT NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_invitations_user_id ON invitations(user_id);
+      CREATE INDEX IF NOT EXISTS idx_invitations_edit_token ON invitations(edit_token);
+      CREATE INDEX IF NOT EXISTS idx_rsvps_invitation_id ON rsvps(invitation_id);
+    `);
+  } else {
+    sqliteDb!.exec(`
+      CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        email TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS sessions (
+        token TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        expires_at TEXT NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS invitations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        slug TEXT NOT NULL UNIQUE,
+        user_id INTEGER,
+        edit_token TEXT NOT NULL,
+        template_id TEXT NOT NULL,
+        palette_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        lang TEXT NOT NULL DEFAULT 'uz',
+        title TEXT NOT NULL,
+        hero_names TEXT NOT NULL,
+        host_line TEXT DEFAULT '',
+        welcome_text TEXT DEFAULT '',
+        event_date TEXT DEFAULT '',
+        event_time TEXT DEFAULT '',
+        venue_name TEXT DEFAULT '',
+        venue_address TEXT DEFAULT '',
+        map_url TEXT DEFAULT '',
+        dress_code TEXT DEFAULT '',
+        contact_phone TEXT DEFAULT '',
+        show_bismillah INTEGER DEFAULT 0,
+        quote_text TEXT DEFAULT '',
+        photo_url TEXT DEFAULT '',
+        program_json TEXT DEFAULT '[]',
+        quiz_json TEXT DEFAULT '[]',
+        views_count INTEGER DEFAULT 0,
+        is_demo INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS rsvps (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        invitation_id INTEGER NOT NULL,
+        guest_name TEXT NOT NULL,
+        phone TEXT DEFAULT '',
+        attendance TEXT NOT NULL CHECK(attendance IN ('yes', 'no', 'maybe')),
+        guests_count INTEGER DEFAULT 1,
+        wish_message TEXT DEFAULT '',
+        quiz_score INTEGER DEFAULT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (invitation_id) REFERENCES invitations(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS media (
+        id TEXT PRIMARY KEY,
+        mime_type TEXT NOT NULL,
+        data_base64 TEXT NOT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_invitations_user_id ON invitations(user_id);
+      CREATE INDEX IF NOT EXISTS idx_invitations_edit_token ON invitations(edit_token);
+      CREATE INDEX IF NOT EXISTS idx_rsvps_invitation_id ON rsvps(invitation_id);
+    `);
+  }
+
+  await seedDemoInvitations();
+}
+
+async function seedDemoInvitations() {
   const demos = [
     {
       slug: 'demo-milliy',
@@ -165,7 +280,6 @@ function seedDemoInvitations() {
         { id: '1', time: '17:00', title: 'Сбор гостей и фуршет', description: 'Живая скрипка и приветственные напитки' },
         { id: '2', time: '18:00', title: 'Торжественная церемония', description: 'Обмен клятвами и кольцами' },
         { id: '3', time: '19:00', title: 'Праздничный банкет', description: 'Ужин, тосты и поздравления' },
-        { id: '4', time: '22:00', title: 'Свадебный торт и финал', description: 'Бенгальские огни и танцы' },
       ],
       quiz: [],
       views_count: 312,
@@ -269,7 +383,6 @@ function seedDemoInvitations() {
         { guest_name: 'Rustamjon va oilasi', phone: '+998 91 543 21 00', attendance: 'yes', guests_count: 4, wish_message: 'Amirbek katta yigit bo‘lsin! To‘y muborak!', quiz_score: null },
       ],
     },
-    // --- NEW LOVE & FESTIVE TEMPLATES ---
     {
       slug: 'demo-sevgi-maktub',
       template_id: 'sevgi-maktub',
@@ -321,30 +434,10 @@ function seedDemoInvitations() {
       photo_url: '',
       program: [],
       quiz: [
-        {
-          id: 'q1',
-          question: 'Biz ilk bor qaysi faslda tanishganmiz?',
-          options: ['Bahorda', 'Yozda', 'Kuzda', 'Qishda'],
-          correctIndex: 0,
-        },
-        {
-          id: 'q2',
-          question: 'Mening eng sevimli ichimligim qaysi?',
-          options: ['Latte qahva', 'Ko‘k choy', 'Yangi apelsin sharbati', 'Issiq shokolad'],
-          correctIndex: 0,
-        },
-        {
-          id: 'q3',
-          question: 'Birga borishni eng ko‘p orzu qiladigan shahrimiz?',
-          options: ['Parij', 'Istanbul', 'Samarqand', 'Rim'],
-          correctIndex: 1,
-        },
-        {
-          id: 'q4',
-          question: 'Senda meni eng birinchi maftun qilgan narsa nima edi?',
-          options: ['Tabassuming', 'Ovozing', 'Hazilkashliging', 'Hamma narsang'],
-          correctIndex: 3,
-        },
+        { id: 'q1', question: 'Biz ilk bor qaysi faslda tanishganmiz?', options: ['Bahorda', 'Yozda', 'Kuzda', 'Qishda'], correctIndex: 0 },
+        { id: 'q2', question: 'Mening eng sevimli ichimligim qaysi?', options: ['Latte qahva', 'Ko‘k choy', 'Yangi apelsin sharbati', 'Issiq shokolad'], correctIndex: 0 },
+        { id: 'q3', question: 'Birga borishni eng ko‘p orzu qiladigan shahrimiz?', options: ['Parij', 'Istanbul', 'Samarqand', 'Rim'], correctIndex: 1 },
+        { id: 'q4', question: 'Senda meni eng birinchi maftun qilgan narsa nima edi?', options: ['Tabassuming', 'Ovozing', 'Hazilkashliging', 'Hamma narsang'], correctIndex: 3 },
       ],
       views_count: 689,
       rsvps: [
@@ -375,7 +468,6 @@ function seedDemoInvitations() {
       program: [
         { id: '1', time: '20:00', title: 'Бокал шампанского на закате', description: 'Вид на вечерний город' },
         { id: '2', time: '20:45', title: 'Авторский ужин при свечах', description: 'Живая музыка и наши любимые песни' },
-        { id: '3', time: '22:00', title: 'Прогулка под звёздами', description: 'Новые мечты и планы на будущее' },
       ],
       quiz: [],
       views_count: 295,
@@ -415,7 +507,6 @@ function seedDemoInvitations() {
         { guest_name: 'Zarina', phone: '+998 93 111 44 55', attendance: 'yes', guests_count: 1, wish_message: 'Tug‘ilgan kuning bilan, jonim! Albatta boraman 🎉', quiz_score: null },
       ],
     },
-    // --- PERSONAL EMOTIONAL CARDS ---
     {
       slug: 'demo-kechirim',
       template_id: 'kechirim',
@@ -524,60 +615,55 @@ function seedDemoInvitations() {
     },
   ];
 
-  const insertInv = db.prepare(`
-    INSERT OR IGNORE INTO invitations (
-      slug, edit_token, template_id, palette_id, event_type, lang, title,
-      hero_names, host_line, welcome_text, event_date, event_time,
-      venue_name, venue_address, map_url, dress_code, contact_phone,
-      show_bismillah, quote_text, photo_url, program_json, quiz_json, views_count, is_demo
-    ) VALUES (
-      ?, ?, ?, ?, ?, ?, ?,
-      ?, ?, ?, ?, ?,
-      ?, ?, ?, ?, ?,
-      ?, ?, ?, ?, ?, ?, 1
-    )
-  `);
-
-  const insertRsvp = db.prepare(`
-    INSERT INTO rsvps (invitation_id, guest_name, phone, attendance, guests_count, wish_message, quiz_score)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `);
-
   for (const demo of demos) {
     const token = crypto.randomBytes(16).toString('hex');
-    const result = insertInv.run(
-      demo.slug,
-      token,
-      demo.template_id,
-      demo.palette_id,
-      demo.event_type,
-      demo.lang,
-      demo.title,
-      demo.hero_names,
-      demo.host_line,
-      demo.welcome_text,
-      demo.event_date,
-      demo.event_time,
-      demo.venue_name,
-      demo.venue_address,
-      demo.map_url,
-      demo.dress_code,
-      demo.contact_phone,
-      demo.show_bismillah,
-      demo.quote_text,
-      demo.photo_url,
-      JSON.stringify(demo.program),
-      JSON.stringify(demo.quiz || []),
-      demo.views_count
+    const inserted = await db.get<{ id: number }>(
+      `INSERT INTO invitations (
+        slug, edit_token, template_id, palette_id, event_type, lang, title,
+        hero_names, host_line, welcome_text, event_date, event_time,
+        venue_name, venue_address, map_url, dress_code, contact_phone,
+        show_bismillah, quote_text, photo_url, program_json, quiz_json, views_count, is_demo
+      ) VALUES (
+        ?, ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?, ?, 1
+      ) ON CONFLICT (slug) DO NOTHING RETURNING id`,
+      [
+        demo.slug,
+        token,
+        demo.template_id,
+        demo.palette_id,
+        demo.event_type,
+        demo.lang,
+        demo.title,
+        demo.hero_names,
+        demo.host_line,
+        demo.welcome_text,
+        demo.event_date,
+        demo.event_time,
+        demo.venue_name,
+        demo.venue_address,
+        demo.map_url,
+        demo.dress_code,
+        demo.contact_phone,
+        demo.show_bismillah,
+        demo.quote_text,
+        demo.photo_url,
+        JSON.stringify(demo.program),
+        JSON.stringify(demo.quiz || []),
+        demo.views_count,
+      ]
     );
 
-    if (result.changes > 0) {
-      const invId = Number(result.lastInsertRowid);
+    if (inserted?.id) {
       for (const r of demo.rsvps) {
-        insertRsvp.run(invId, r.guest_name, r.phone, r.attendance, r.guests_count, r.wish_message, r.quiz_score);
+        await db.run(
+          `INSERT INTO rsvps (invitation_id, guest_name, phone, attendance, guests_count, wish_message, quiz_score)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [inserted.id, r.guest_name, r.phone, r.attendance, r.guests_count, r.wish_message, r.quiz_score]
+        );
       }
     }
   }
 }
-
-seedDemoInvitations();

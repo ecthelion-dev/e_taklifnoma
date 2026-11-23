@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import QRCode from 'qrcode';
-import { db, UPLOADS_DIR } from './db.ts';
+import { db, initDatabase, isPostgres } from './db.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -17,10 +17,10 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const SESSION_COOKIE = 'etaklif_session';
 
+app.set('trust proxy', 1);
 app.use(cors({ origin: true, credentials: true }));
 app.use(cookieParser());
 app.use(express.json({ limit: '6mb' }));
-app.use('/uploads', express.static(UPLOADS_DIR, { maxAge: '30d' }));
 
 // --- Helpers ---
 function hashPassword(password: string): string {
@@ -51,24 +51,23 @@ interface AuthUser {
   email: string;
 }
 
-function getCurrentUser(req: Request): AuthUser | null {
+async function getCurrentUser(req: Request): Promise<AuthUser | null> {
   const token = req.cookies?.[SESSION_COOKIE];
   if (!token) return null;
-  const row = db
-    .prepare(
-      `SELECT u.id, u.name, u.email, s.expires_at
-       FROM sessions s
-       JOIN users u ON u.id = s.user_id
-       WHERE s.token = ?`
-    )
-    .get(token) as (AuthUser & { expires_at: string }) | undefined;
+  const row = await db.get<AuthUser & { expires_at: string }>(
+    `SELECT u.id, u.name, u.email, s.expires_at
+     FROM sessions s
+     JOIN users u ON u.id = s.user_id
+     WHERE s.token = ?`,
+    [token]
+  );
 
   if (!row) return null;
   if (new Date(row.expires_at).getTime() < Date.now()) {
-    db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
+    await db.run('DELETE FROM sessions WHERE token = ?', [token]);
     return null;
   }
-  return { id: row.id, name: row.name, email: row.email };
+  return { id: Number(row.id), name: row.name, email: row.email };
 }
 
 function getEditTokens(req: Request): string[] {
@@ -95,7 +94,7 @@ function serializeInvitation(row: Record<string, unknown>, includeToken = false)
     quiz = [];
   }
   const base: Record<string, unknown> = {
-    id: row.id,
+    id: Number(row.id),
     slug: row.slug,
     templateId: row.template_id,
     paletteId: row.palette_id,
@@ -129,10 +128,13 @@ function serializeInvitation(row: Record<string, unknown>, includeToken = false)
   return base;
 }
 
-function canManageInvitation(req: Request, inv: { user_id: number | null; edit_token: string; is_demo: number }): boolean {
+async function canManageInvitation(
+  req: Request,
+  inv: { user_id: number | null; edit_token: string; is_demo: number }
+): Promise<boolean> {
   if (inv.is_demo) return false;
-  const user = getCurrentUser(req);
-  if (user && inv.user_id === user.id) return true;
+  const user = await getCurrentUser(req);
+  if (user && inv.user_id !== null && Number(inv.user_id) === user.id) return true;
   const tokens = getEditTokens(req);
   const bodyToken = typeof req.body?.editToken === 'string' ? req.body.editToken : '';
   const queryToken = typeof req.query?.editToken === 'string' ? req.query.editToken : '';
@@ -141,32 +143,49 @@ function canManageInvitation(req: Request, inv: { user_id: number | null; edit_t
 
 // --- Health ---
 app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, time: new Date().toISOString() });
+  res.json({ ok: true, db: isPostgres ? 'postgres' : 'sqlite', time: new Date().toISOString() });
+});
+
+// --- Persistent Media Serving (from DB so photos survive Render restarts) ---
+app.get('/uploads/:id', async (req: Request, res: Response) => {
+  const row = await db.get<{ mime_type: string; data_base64: string }>(
+    'SELECT mime_type, data_base64 FROM media WHERE id = ?',
+    [req.params.id]
+  );
+  if (!row) {
+    res.status(404).send('Not found');
+    return;
+  }
+  const buffer = Buffer.from(row.data_base64, 'base64');
+  res.setHeader('Content-Type', row.mime_type);
+  res.setHeader('Cache-Control', 'public, max-age=2592000, immutable');
+  res.send(buffer);
 });
 
 // --- Auth ---
-app.post('/api/auth/register', (req: Request, res: Response) => {
+app.post('/api/auth/register', async (req: Request, res: Response) => {
   const { name, email, password } = req.body || {};
   if (!name || !email || !password || String(password).length < 6) {
     res.status(400).json({ error: 'Ism, email va kamida 6 belgili parol kiriting.' });
     return;
   }
   const normalizedEmail = String(email).trim().toLowerCase();
-  const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(normalizedEmail);
+  const existing = await db.get('SELECT id FROM users WHERE email = ?', [normalizedEmail]);
   if (existing) {
     res.status(409).json({ error: 'Bu email allaqachon ro‘yxatdan o‘tgan.' });
     return;
   }
 
   const hash = hashPassword(String(password));
-  const result = db
-    .prepare('INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)')
-    .run(String(name).trim(), normalizedEmail, hash);
+  const inserted = await db.get<{ id: number }>(
+    'INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?) RETURNING id',
+    [String(name).trim(), normalizedEmail, hash]
+  );
 
-  const userId = Number(result.lastInsertRowid);
+  const userId = Number(inserted!.id);
   const token = crypto.randomBytes(32).toString('hex');
   const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
-  db.prepare('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)').run(token, userId, expiresAt);
+  await db.run('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)', [token, userId, expiresAt]);
 
   res.cookie(SESSION_COOKIE, token, {
     httpOnly: true,
@@ -177,16 +196,17 @@ app.post('/api/auth/register', (req: Request, res: Response) => {
   res.status(201).json({ user: { id: userId, name: String(name).trim(), email: normalizedEmail } });
 });
 
-app.post('/api/auth/login', (req: Request, res: Response) => {
+app.post('/api/auth/login', async (req: Request, res: Response) => {
   const { email, password } = req.body || {};
   if (!email || !password) {
     res.status(400).json({ error: 'Email va parolni kiriting.' });
     return;
   }
   const normalizedEmail = String(email).trim().toLowerCase();
-  const user = db
-    .prepare('SELECT id, name, email, password_hash FROM users WHERE email = ?')
-    .get(normalizedEmail) as (AuthUser & { password_hash: string }) | undefined;
+  const user = await db.get<AuthUser & { password_hash: string }>(
+    'SELECT id, name, email, password_hash FROM users WHERE email = ?',
+    [normalizedEmail]
+  );
 
   if (!user || !verifyPassword(String(password), user.password_hash)) {
     res.status(401).json({ error: 'Email yoki parol noto‘g‘ri.' });
@@ -195,7 +215,7 @@ app.post('/api/auth/login', (req: Request, res: Response) => {
 
   const token = crypto.randomBytes(32).toString('hex');
   const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
-  db.prepare('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)').run(token, user.id, expiresAt);
+  await db.run('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)', [token, user.id, expiresAt]);
 
   res.cookie(SESSION_COOKIE, token, {
     httpOnly: true,
@@ -203,75 +223,74 @@ app.post('/api/auth/login', (req: Request, res: Response) => {
     maxAge: 30 * 24 * 60 * 60 * 1000,
   });
 
-  res.json({ user: { id: user.id, name: user.name, email: user.email } });
+  res.json({ user: { id: Number(user.id), name: user.name, email: user.email } });
 });
 
-app.post('/api/auth/logout', (req: Request, res: Response) => {
+app.post('/api/auth/logout', async (req: Request, res: Response) => {
   const token = req.cookies?.[SESSION_COOKIE];
   if (token) {
-    db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
+    await db.run('DELETE FROM sessions WHERE token = ?', [token]);
   }
   res.clearCookie(SESSION_COOKIE);
   res.json({ ok: true });
 });
 
-app.get('/api/auth/me', (req: Request, res: Response) => {
-  const user = getCurrentUser(req);
+app.get('/api/auth/me', async (req: Request, res: Response) => {
+  const user = await getCurrentUser(req);
   res.json({ user });
 });
 
-// --- Photo Upload ---
-app.post('/api/upload', (req: Request, res: Response) => {
+// --- Photo Upload (stored persistently in DB) ---
+app.post('/api/upload', async (req: Request, res: Response) => {
   const { dataUrl } = req.body || {};
   if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/')) {
     res.status(400).json({ error: 'Faqat rasm fayllari qo‘llab-quvvatlanadi.' });
     return;
   }
-  const match = dataUrl.match(/^data:image\/(png|jpeg|jpg|webp);base64,(.+)$/);
+  const match = dataUrl.match(/^data:(image\/(png|jpeg|jpg|webp));base64,(.+)$/);
   if (!match) {
     res.status(400).json({ error: 'Rasm formati noto‘g‘ri (PNG, JPG, WEBP).' });
     return;
   }
-  const ext = match[1] === 'jpeg' ? 'jpg' : match[1];
-  const buffer = Buffer.from(match[2], 'base64');
+  const mimeType = match[1];
+  const ext = match[2] === 'jpeg' ? 'jpg' : match[2];
+  const base64 = match[3];
+  const buffer = Buffer.from(base64, 'base64');
   if (buffer.length > 4 * 1024 * 1024) {
     res.status(413).json({ error: 'Rasm hajmi 4MB dan oshmasligi kerak.' });
     return;
   }
-  const filename = `${Date.now()}-${crypto.randomBytes(6).toString('hex')}.${ext}`;
-  fs.writeFileSync(path.join(UPLOADS_DIR, filename), buffer);
-  res.json({ url: `/uploads/${filename}` });
+  const id = `${Date.now()}-${crypto.randomBytes(6).toString('hex')}.${ext}`;
+  await db.run('INSERT INTO media (id, mime_type, data_base64) VALUES (?, ?, ?)', [id, mimeType, base64]);
+  res.json({ url: `/uploads/${id}` });
 });
 
 // --- Invitations ---
-app.get('/api/invitations/demos', (_req, res) => {
-  const rows = db
-    .prepare(
-      `SELECT i.*,
-        (SELECT COUNT(*) FROM rsvps r WHERE r.invitation_id = i.id) as rsvp_count,
-        (SELECT COUNT(*) FROM rsvps r WHERE r.invitation_id = i.id AND r.attendance = 'yes') as going_count,
-        (SELECT COALESCE(SUM(r.guests_count), 0) FROM rsvps r WHERE r.invitation_id = i.id AND r.attendance = 'yes') as total_guests
-       FROM invitations i
-       WHERE i.is_demo = 1
-       ORDER BY i.id ASC`
-    )
-    .all() as Record<string, unknown>[];
-
+app.get('/api/invitations/demos', async (_req, res) => {
+  const rows = await db.query(
+    `SELECT i.*,
+      (SELECT COUNT(*) FROM rsvps r WHERE r.invitation_id = i.id) as rsvp_count,
+      (SELECT COUNT(*) FROM rsvps r WHERE r.invitation_id = i.id AND r.attendance = 'yes') as going_count,
+      (SELECT COALESCE(SUM(r.guests_count), 0) FROM rsvps r WHERE r.invitation_id = i.id AND r.attendance = 'yes') as total_guests
+     FROM invitations i
+     WHERE i.is_demo = 1
+     ORDER BY i.id ASC`
+  );
   res.json({ invitations: rows.map((r) => serializeInvitation(r, false)) });
 });
 
-app.get('/api/invitations/check-slug/:slug', (req, res) => {
+app.get('/api/invitations/check-slug/:slug', async (req, res) => {
   const slug = sanitizeSlug(req.params.slug);
   if (!slug || slug.length < 3) {
     res.json({ available: false, sanitized: slug });
     return;
   }
-  const exists = db.prepare('SELECT id FROM invitations WHERE slug = ?').get(slug);
+  const exists = await db.get('SELECT id FROM invitations WHERE slug = ?', [slug]);
   res.json({ available: !exists, sanitized: slug });
 });
 
-app.get('/api/invitations/mine', (req, res) => {
-  const user = getCurrentUser(req);
+app.get('/api/invitations/mine', async (req, res) => {
+  const user = await getCurrentUser(req);
   const tokens = getEditTokens(req);
 
   const conditions: string[] = [];
@@ -302,12 +321,12 @@ app.get('/api/invitations/mine', (req, res) => {
     ORDER BY i.created_at DESC
   `;
 
-  const rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
+  const rows = await db.query(sql, params);
   res.json({ invitations: rows.map((r) => serializeInvitation(r, true)) });
 });
 
-app.post('/api/invitations/claim', (req, res) => {
-  const user = getCurrentUser(req);
+app.post('/api/invitations/claim', async (req, res) => {
+  const user = await getCurrentUser(req);
   if (!user) {
     res.status(401).json({ error: 'Avval tizimga kiring.' });
     return;
@@ -318,36 +337,36 @@ app.post('/api/invitations/claim', (req, res) => {
     return;
   }
   const placeholders = tokens.map(() => '?').join(',');
-  const result = db
-    .prepare(`UPDATE invitations SET user_id = ? WHERE edit_token IN (${placeholders}) AND user_id IS NULL`)
-    .run(user.id, ...tokens);
-  res.json({ claimed: Number(result.changes || 0) });
+  const result = await db.run(
+    `UPDATE invitations SET user_id = ? WHERE edit_token IN (${placeholders}) AND user_id IS NULL`,
+    [user.id, ...tokens]
+  );
+  res.json({ claimed: result.changes });
 });
 
-app.get('/api/invitations/:slug', (req, res) => {
+app.get('/api/invitations/:slug', async (req, res) => {
   const slug = req.params.slug;
-  const row = db.prepare('SELECT * FROM invitations WHERE slug = ?').get(slug) as Record<string, unknown> | undefined;
+  const row = await db.get('SELECT * FROM invitations WHERE slug = ?', [slug]);
   if (!row) {
     res.status(404).json({ error: 'Taklifnoma topilmadi.' });
     return;
   }
 
   if (req.query.preview !== '1') {
-    db.prepare('UPDATE invitations SET views_count = views_count + 1 WHERE id = ?').run(Number(row.id));
+    await db.run('UPDATE invitations SET views_count = views_count + 1 WHERE id = ?', [Number(row.id)]);
     row.views_count = Number(row.views_count || 0) + 1;
   }
 
-  const wishes = db
-    .prepare(
-      `SELECT id, guest_name as guestName, attendance, guests_count as guestsCount, wish_message as wishMessage, created_at as createdAt
-       FROM rsvps
-       WHERE invitation_id = ? AND TRIM(wish_message) != ''
-       ORDER BY id DESC
-       LIMIT 30`
-    )
-    .all(Number(row.id));
+  const wishes = await db.query(
+    `SELECT id, guest_name as "guestName", attendance, guests_count as "guestsCount", wish_message as "wishMessage", created_at as "createdAt"
+     FROM rsvps
+     WHERE invitation_id = ? AND TRIM(wish_message) != ''
+     ORDER BY id DESC
+     LIMIT 30`,
+    [Number(row.id)]
+  );
 
-  const canManage = canManageInvitation(req, {
+  const canManage = await canManageInvitation(req, {
     user_id: row.user_id as number | null,
     edit_token: String(row.edit_token),
     is_demo: Number(row.is_demo || 0),
@@ -360,9 +379,9 @@ app.get('/api/invitations/:slug', (req, res) => {
   });
 });
 
-app.post('/api/invitations', (req, res) => {
+app.post('/api/invitations', async (req, res) => {
   const b = req.body || {};
-  const user = getCurrentUser(req);
+  const user = await getCurrentUser(req);
 
   const heroNames = String(b.heroNames || '').trim();
   const eventDate = String(b.eventDate || '').trim();
@@ -379,7 +398,7 @@ app.post('/api/invitations', (req, res) => {
     slug = `${base.slice(0, 32)}-${crypto.randomBytes(2).toString('hex')}`;
   }
 
-  const existing = db.prepare('SELECT id FROM invitations WHERE slug = ?').get(slug);
+  const existing = await db.get('SELECT id FROM invitations WHERE slug = ?', [slug]);
   if (existing) {
     slug = `${slug}-${crypto.randomBytes(2).toString('hex')}`;
   }
@@ -388,21 +407,19 @@ app.post('/api/invitations', (req, res) => {
   const programJson = JSON.stringify(Array.isArray(b.program) ? b.program : []);
   const quizJson = JSON.stringify(Array.isArray(b.quiz) ? b.quiz : []);
 
-  const result = db
-    .prepare(
-      `INSERT INTO invitations (
-        slug, user_id, edit_token, template_id, palette_id, event_type, lang,
-        title, hero_names, host_line, welcome_text, event_date, event_time,
-        venue_name, venue_address, map_url, dress_code, contact_phone,
-        show_bismillah, quote_text, photo_url, program_json, quiz_json
-      ) VALUES (
-        ?, ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?
-      )`
-    )
-    .run(
+  const inserted = await db.get<{ id: number }>(
+    `INSERT INTO invitations (
+      slug, user_id, edit_token, template_id, palette_id, event_type, lang,
+      title, hero_names, host_line, welcome_text, event_date, event_time,
+      venue_name, venue_address, map_url, dress_code, contact_phone,
+      show_bismillah, quote_text, photo_url, program_json, quiz_json
+    ) VALUES (
+      ?, ?, ?, ?, ?, ?, ?,
+      ?, ?, ?, ?, ?, ?,
+      ?, ?, ?, ?, ?,
+      ?, ?, ?, ?, ?
+    ) RETURNING id`,
+    [
       slug,
       user ? user.id : null,
       editToken,
@@ -415,7 +432,7 @@ app.post('/api/invitations', (req, res) => {
       String(b.hostLine || ''),
       String(b.welcomeText || ''),
       eventDate,
-      String(b.eventTime || '18:00'),
+      String(b.eventTime || ''),
       venueName,
       String(b.venueAddress || ''),
       String(b.mapUrl || ''),
@@ -425,35 +442,30 @@ app.post('/api/invitations', (req, res) => {
       String(b.quoteText || ''),
       String(b.photoUrl || ''),
       programJson,
-      quizJson
-    );
+      quizJson,
+    ]
+  );
 
-  const created = db.prepare('SELECT * FROM invitations WHERE id = ?').get(Number(result.lastInsertRowid)) as Record<
-    string,
-    unknown
-  >;
-
+  const created = (await db.get('SELECT * FROM invitations WHERE id = ?', [Number(inserted!.id)]))!;
   res.status(201).json({
     invitation: serializeInvitation(created, true),
     editToken,
   });
 });
 
-app.put('/api/invitations/:slug', (req, res) => {
-  const row = db.prepare('SELECT * FROM invitations WHERE slug = ?').get(req.params.slug) as
-    | Record<string, unknown>
-    | undefined;
+app.put('/api/invitations/:slug', async (req, res) => {
+  const row = await db.get('SELECT * FROM invitations WHERE slug = ?', [req.params.slug]);
   if (!row) {
     res.status(404).json({ error: 'Taklifnoma topilmadi.' });
     return;
   }
 
   if (
-    !canManageInvitation(req, {
+    !(await canManageInvitation(req, {
       user_id: row.user_id as number | null,
       edit_token: String(row.edit_token),
       is_demo: Number(row.is_demo || 0),
-    })
+    }))
   ) {
     res.status(403).json({ error: 'Ushbu taklifnomani tahrirlash huquqingiz yo‘q.' });
     return;
@@ -463,70 +475,70 @@ app.put('/api/invitations/:slug', (req, res) => {
   const programJson = JSON.stringify(Array.isArray(b.program) ? b.program : []);
   const quizJson = JSON.stringify(Array.isArray(b.quiz) ? b.quiz : []);
 
-  db.prepare(
+  await db.run(
     `UPDATE invitations SET
       template_id = ?, palette_id = ?, event_type = ?, lang = ?,
       title = ?, hero_names = ?, host_line = ?, welcome_text = ?,
       event_date = ?, event_time = ?, venue_name = ?, venue_address = ?,
       map_url = ?, dress_code = ?, contact_phone = ?, show_bismillah = ?,
       quote_text = ?, photo_url = ?, program_json = ?, quiz_json = ?, updated_at = CURRENT_TIMESTAMP
-     WHERE id = ?`
-  ).run(
-    String(b.templateId || row.template_id),
-    String(b.paletteId || row.palette_id),
-    String(b.eventType || row.event_type),
-    b.lang === 'ru' ? 'ru' : 'uz',
-    String(b.title ?? row.title),
-    String(b.heroNames ?? row.hero_names),
-    String(b.hostLine ?? row.host_line),
-    String(b.welcomeText ?? row.welcome_text),
-    String(b.eventDate ?? row.event_date),
-    String(b.eventTime ?? row.event_time),
-    String(b.venueName ?? row.venue_name),
-    String(b.venueAddress ?? row.venue_address),
-    String(b.mapUrl ?? row.map_url),
-    String(b.dressCode ?? row.dress_code),
-    String(b.contactPhone ?? row.contact_phone),
-    b.showBismillah ? 1 : 0,
-    String(b.quoteText ?? row.quote_text),
-    String(b.photoUrl ?? row.photo_url),
-    programJson,
-    quizJson,
-    Number(row.id)
+     WHERE id = ?`,
+    [
+      String(b.templateId || row.template_id),
+      String(b.paletteId || row.palette_id),
+      String(b.eventType || row.event_type),
+      b.lang === 'ru' ? 'ru' : 'uz',
+      String(b.title ?? row.title),
+      String(b.heroNames ?? row.hero_names),
+      String(b.hostLine ?? row.host_line),
+      String(b.welcomeText ?? row.welcome_text),
+      String(b.eventDate ?? row.event_date),
+      String(b.eventTime ?? row.event_time),
+      String(b.venueName ?? row.venue_name),
+      String(b.venueAddress ?? row.venue_address),
+      String(b.mapUrl ?? row.map_url),
+      String(b.dressCode ?? row.dress_code),
+      String(b.contactPhone ?? row.contact_phone),
+      b.showBismillah ? 1 : 0,
+      String(b.quoteText ?? row.quote_text),
+      String(b.photoUrl ?? row.photo_url),
+      programJson,
+      quizJson,
+      Number(row.id),
+    ]
   );
 
-  const updated = db.prepare('SELECT * FROM invitations WHERE id = ?').get(Number(row.id)) as Record<string, unknown>;
+  const updated = (await db.get('SELECT * FROM invitations WHERE id = ?', [Number(row.id)]))!;
   res.json({ invitation: serializeInvitation(updated, true) });
 });
 
-app.delete('/api/invitations/:slug', (req, res) => {
-  const row = db.prepare('SELECT * FROM invitations WHERE slug = ?').get(req.params.slug) as
-    | Record<string, unknown>
-    | undefined;
+app.delete('/api/invitations/:slug', async (req, res) => {
+  const row = await db.get('SELECT * FROM invitations WHERE slug = ?', [req.params.slug]);
   if (!row) {
     res.status(404).json({ error: 'Taklifnoma topilmadi.' });
     return;
   }
   if (
-    !canManageInvitation(req, {
+    !(await canManageInvitation(req, {
       user_id: row.user_id as number | null,
       edit_token: String(row.edit_token),
       is_demo: Number(row.is_demo || 0),
-    })
+    }))
   ) {
     res.status(403).json({ error: 'O‘chirish huquqingiz yo‘q.' });
     return;
   }
-  db.prepare('DELETE FROM invitations WHERE id = ?').run(Number(row.id));
+  await db.run('DELETE FROM invitations WHERE id = ?', [Number(row.id)]);
   res.json({ ok: true });
 });
 
 // --- QR Code ---
 app.get('/api/invitations/:slug/qr', async (req, res) => {
   const slug = req.params.slug;
-  const origin = typeof req.query.origin === 'string' && req.query.origin.startsWith('http')
-    ? req.query.origin
-    : `${req.protocol}://${req.get('host')}`;
+  const origin =
+    typeof req.query.origin === 'string' && req.query.origin.startsWith('http')
+      ? req.query.origin
+      : `${req.protocol}://${req.get('host')}`;
   const targetUrl = `${origin}/i/${slug}`;
 
   try {
@@ -542,10 +554,8 @@ app.get('/api/invitations/:slug/qr', async (req, res) => {
 });
 
 // --- RSVPs ---
-app.post('/api/invitations/:slug/rsvp', (req, res) => {
-  const inv = db.prepare('SELECT id FROM invitations WHERE slug = ?').get(req.params.slug) as
-    | { id: number }
-    | undefined;
+app.post('/api/invitations/:slug/rsvp', async (req, res) => {
+  const inv = await db.get<{ id: number }>('SELECT id FROM invitations WHERE slug = ?', [req.params.slug]);
   if (!inv) {
     res.status(404).json({ error: 'Taklifnoma topilmadi.' });
     return;
@@ -563,35 +573,31 @@ app.post('/api/invitations/:slug/rsvp', (req, res) => {
       ? Math.max(0, Math.min(100, Math.round(Number(quizScore))))
       : null;
 
-  const result = db
-    .prepare(
-      `INSERT INTO rsvps (invitation_id, guest_name, phone, attendance, guests_count, wish_message, quiz_score)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
-    )
-    .run(
-      inv.id,
+  const inserted = await db.get<{ id: number }>(
+    `INSERT INTO rsvps (invitation_id, guest_name, phone, attendance, guests_count, wish_message, quiz_score)
+     VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+    [
+      Number(inv.id),
       String(guestName).trim(),
       String(phone || '').trim(),
       validAttendance,
       count,
       String(wishMessage || '').trim(),
-      parsedScore
-    );
+      parsedScore,
+    ]
+  );
 
-  const created = db
-    .prepare(
-      `SELECT id, invitation_id as invitationId, guest_name as guestName, phone, attendance, guests_count as guestsCount, wish_message as wishMessage, quiz_score as quizScore, created_at as createdAt
-       FROM rsvps WHERE id = ?`
-    )
-    .get(Number(result.lastInsertRowid));
+  const created = await db.get(
+    `SELECT id, invitation_id as "invitationId", guest_name as "guestName", phone, attendance, guests_count as "guestsCount", wish_message as "wishMessage", quiz_score as "quizScore", created_at as "createdAt"
+     FROM rsvps WHERE id = ?`,
+    [Number(inserted!.id)]
+  );
 
   res.status(201).json({ rsvp: created });
 });
 
-app.get('/api/invitations/:slug/rsvps', (req, res) => {
-  const row = db.prepare('SELECT * FROM invitations WHERE slug = ?').get(req.params.slug) as
-    | Record<string, unknown>
-    | undefined;
+app.get('/api/invitations/:slug/rsvps', async (req, res) => {
+  const row = await db.get('SELECT * FROM invitations WHERE slug = ?', [req.params.slug]);
   if (!row) {
     res.status(404).json({ error: 'Taklifnoma topilmadi.' });
     return;
@@ -600,53 +606,52 @@ app.get('/api/invitations/:slug/rsvps', (req, res) => {
   const isDemo = Boolean(row.is_demo);
   if (
     !isDemo &&
-    !canManageInvitation(req, {
+    !(await canManageInvitation(req, {
       user_id: row.user_id as number | null,
       edit_token: String(row.edit_token),
       is_demo: 0,
-    })
+    }))
   ) {
     res.status(403).json({ error: 'Mehmonlar ro‘yxatini ko‘rish huquqingiz yo‘q.' });
     return;
   }
 
-  const rsvps = db
-    .prepare(
-      `SELECT id, invitation_id as invitationId, guest_name as guestName, phone, attendance, guests_count as guestsCount, wish_message as wishMessage, quiz_score as quizScore, created_at as createdAt
-       FROM rsvps WHERE invitation_id = ? ORDER BY id DESC`
-    )
-    .all(Number(row.id)) as Array<{ attendance: string; guestsCount: number }>;
+  const rsvps = await db.query<{ attendance: string; guestsCount: number }>(
+    `SELECT id, invitation_id as "invitationId", guest_name as "guestName", phone, attendance, guests_count as "guestsCount", wish_message as "wishMessage", quiz_score as "quizScore", created_at as "createdAt"
+     FROM rsvps WHERE invitation_id = ? ORDER BY id DESC`,
+    [Number(row.id)]
+  );
 
   const summary = {
     totalResponses: rsvps.length,
     goingResponses: rsvps.filter((r) => r.attendance === 'yes').length,
     declinedResponses: rsvps.filter((r) => r.attendance === 'no').length,
     maybeResponses: rsvps.filter((r) => r.attendance === 'maybe').length,
-    totalGuests: rsvps.filter((r) => r.attendance === 'yes').reduce((acc, r) => acc + Number(r.guestsCount || 0), 0),
+    totalGuests: rsvps
+      .filter((r) => r.attendance === 'yes')
+      .reduce((acc, r) => acc + Number(r.guestsCount || 0), 0),
   };
 
   res.json({ rsvps, summary });
 });
 
-app.delete('/api/invitations/:slug/rsvps/:id', (req, res) => {
-  const row = db.prepare('SELECT * FROM invitations WHERE slug = ?').get(req.params.slug) as
-    | Record<string, unknown>
-    | undefined;
+app.delete('/api/invitations/:slug/rsvps/:id', async (req, res) => {
+  const row = await db.get('SELECT * FROM invitations WHERE slug = ?', [req.params.slug]);
   if (!row) {
     res.status(404).json({ error: 'Taklifnoma topilmadi.' });
     return;
   }
   if (
-    !canManageInvitation(req, {
+    !(await canManageInvitation(req, {
       user_id: row.user_id as number | null,
       edit_token: String(row.edit_token),
       is_demo: Number(row.is_demo || 0),
-    })
+    }))
   ) {
     res.status(403).json({ error: 'O‘chirish huquqingiz yo‘q.' });
     return;
   }
-  db.prepare('DELETE FROM rsvps WHERE id = ? AND invitation_id = ?').run(Number(req.params.id), Number(row.id));
+  await db.run('DELETE FROM rsvps WHERE id = ? AND invitation_id = ?', [Number(req.params.id), Number(row.id)]);
   res.json({ ok: true });
 });
 
@@ -666,17 +671,22 @@ if (fs.existsSync(DIST_DIR)) {
   app.use('/assets', express.static(path.join(DIST_DIR, 'assets'), { maxAge: '1y', immutable: true }));
   app.use(express.static(DIST_DIR, { maxAge: '1h' }));
 
-  // Dynamic OpenGraph tags for Telegram / WhatsApp link previews on /i/:slug
-  app.get('/i/:slug', (req, res) => {
+  app.get('/i/:slug', async (req, res) => {
     if (!cachedIndexHtml) {
       res.sendFile(indexHtmlPath);
       return;
     }
-    const row = db
-      .prepare('SELECT title, hero_names, host_line, welcome_text, venue_name, photo_url FROM invitations WHERE slug = ?')
-      .get(req.params.slug) as
-      | { title: string; hero_names: string; host_line: string; welcome_text: string; venue_name: string; photo_url: string }
-      | undefined;
+    const row = await db.get<{
+      title: string;
+      hero_names: string;
+      host_line: string;
+      welcome_text: string;
+      venue_name: string;
+      photo_url: string;
+    }>(
+      'SELECT title, hero_names, host_line, welcome_text, venue_name, photo_url FROM invitations WHERE slug = ?',
+      [req.params.slug]
+    );
 
     if (!row) {
       res.type('html').send(cachedIndexHtml);
@@ -688,7 +698,9 @@ if (fs.existsSync(DIST_DIR)) {
     const ogDesc = escapeHtml(descSource.slice(0, 180));
     const origin = `${req.protocol}://${req.get('host')}`;
     const ogImageTag = row.photo_url
-      ? `<meta property="og:image" content="${escapeHtml(row.photo_url.startsWith('http') ? row.photo_url : `${origin}${row.photo_url}`)}" />`
+      ? `<meta property="og:image" content="${escapeHtml(
+          row.photo_url.startsWith('http') ? row.photo_url : `${origin}${row.photo_url}`
+        )}" />`
       : '';
 
     const metaInjection = `
@@ -713,6 +725,14 @@ if (fs.existsSync(DIST_DIR)) {
   });
 }
 
-app.listen(PORT, () => {
-  console.log(`eTaklif server running at http://localhost:${PORT}`);
-});
+// Start server after DB initialization
+initDatabase()
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`eTaklif server running at http://localhost:${PORT}`);
+    });
+  })
+  .catch((err) => {
+    console.error('Failed to initialize database:', err);
+    process.exit(1);
+  });
