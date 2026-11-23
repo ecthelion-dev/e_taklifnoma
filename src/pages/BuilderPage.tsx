@@ -259,7 +259,15 @@ export const BuilderPage: React.FC = () => {
 
   const shareUrl = publishedSlug ? `${window.location.origin}/i/${publishedSlug}` : '';
 
-  const tabs: Array<{ id: EditorTab; label: string; icon: React.ComponentType<{ className?: string }> }> = [
+  const isPureLetter =
+    form.templateId === 'sevgi-maktub' ||
+    form.templateId === 'sevgi-test' ||
+    form.templateId === 'kechirim' ||
+    form.templateId === 'rahmat' ||
+    form.templateId === 'sogindim' ||
+    form.templateId === 'tabrik';
+
+  const allTabs: Array<{ id: EditorTab; label: string; icon: React.ComponentType<{ className?: string }> }> = [
     { id: 'design', label: t.tabs.design, icon: Palette },
     { id: 'details', label: t.tabs.details, icon: FileText },
     { id: 'venue', label: t.tabs.venue, icon: MapPin },
@@ -267,6 +275,16 @@ export const BuilderPage: React.FC = () => {
     { id: 'quiz', label: t.tabs.quiz, icon: Heart },
     { id: 'media', label: t.tabs.media, icon: ImageIcon },
   ];
+
+  const tabs = isPureLetter
+    ? allTabs.filter((tab) => tab.id !== 'venue' && tab.id !== 'program')
+    : allTabs;
+
+  useEffect(() => {
+    if (isPureLetter && (activeTab === 'venue' || activeTab === 'program')) {
+      setActiveTab('details');
+    }
+  }, [isPureLetter, activeTab]);
 
   const visibleTemplates =
     tplCategory === 'all' ? TEMPLATE_CATALOG : TEMPLATE_CATALOG.filter((x) => x.category === tplCategory);
@@ -349,8 +367,12 @@ export const BuilderPage: React.FC = () => {
         {/* LEFT EDITOR PANEL */}
         <div className={`lg:col-span-5 ${mobileView === 'preview' ? 'hidden lg:block' : 'block'}`}>
           <div className="overflow-hidden rounded-3xl border border-stone-200 bg-white shadow-xs">
-            {/* Section Tabs — 3x2 on mobile, 6x1 on sm+ */}
-            <div className="grid grid-cols-3 gap-1 border-b border-stone-200 bg-stone-50/70 p-1.5 sm:grid-cols-6">
+            {/* Section Tabs — adaptive columns */}
+            <div
+              className={`grid gap-1 border-b border-stone-200 bg-stone-50/70 p-1.5 ${
+                tabs.length === 4 ? 'grid-cols-4' : 'grid-cols-3 sm:grid-cols-6'
+              }`}
+            >
               {tabs.map((tab) => {
                 const Icon = tab.icon;
                 const active = activeTab === tab.id;
