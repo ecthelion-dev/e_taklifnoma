@@ -509,9 +509,13 @@ export const HomePage: React.FC = () => {
             <Sparkles className="h-4 w-4 text-emerald-900" />
             <span className="font-serif-display text-lg font-bold text-stone-900">{t.brand}</span>
             <span>•</span>
-            <span>
-              {lang === 'ru' ? 'Разработчик:' : 'Dasturchi:'}{' '}
-              <strong className="font-semibold text-stone-800">Farrux</strong>
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-stone-200 bg-white px-3 py-1 text-[11px] font-medium text-stone-500 shadow-2xs">
+              <span>Crafted with</span>
+              <Heart className="h-3 w-3 fill-rose-500 text-rose-500" />
+              <span>by</span>
+              <span className="bg-gradient-to-r from-emerald-900 to-amber-700 bg-clip-text font-semibold tracking-wide text-transparent">
+                Farrux
+              </span>
             </span>
           </div>
           <div className="flex items-center gap-4">
