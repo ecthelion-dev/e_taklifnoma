@@ -12,6 +12,7 @@ import {
   CheckCircle2,
   HelpCircle,
   XCircle,
+  Bell,
   Info,
 } from 'lucide-react';
 import { Navbar } from '../components/Navbar';
@@ -38,6 +39,14 @@ export const DashboardPage: React.FC = () => {
   });
   const [rsvpLoading, setRsvpLoading] = useState(false);
   const [qrSlug, setQrSlug] = useState<{ slug: string; title: string } | null>(null);
+  const [telegramBot, setTelegramBot] = useState<string | null>(null);
+
+  useEffect(() => {
+    api
+      .getConfig()
+      .then((res) => setTelegramBot(res.telegramBotUsername))
+      .catch(() => {});
+  }, []);
 
   const loadMine = async () => {
     setLoading(true);
@@ -243,6 +252,24 @@ export const DashboardPage: React.FC = () => {
                         <QrCode className="h-3.5 w-3.5" />
                         {t.qr}
                       </button>
+                      {telegramBot && inv.editToken && (
+                        inv.telegramConnected ? (
+                          <span className="inline-flex items-center gap-1 rounded-xl bg-emerald-50 px-2.5 py-1.5 text-[11px] font-semibold text-emerald-800">
+                            <Bell className="h-3.5 w-3.5" />
+                            {lang === 'ru' ? 'Telegram подключён' : 'Telegram ulangan'}
+                          </span>
+                        ) : (
+                          <a
+                            href={`https://t.me/${telegramBot}?start=${encodeURIComponent(inv.editToken)}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-1 rounded-xl bg-sky-50 px-3 py-1.5 text-xs font-semibold text-sky-800 hover:bg-sky-100"
+                          >
+                            <Bell className="h-3.5 w-3.5" />
+                            {lang === 'ru' ? 'Уведомления TG' : 'TG bildirishnoma'}
+                          </a>
+                        )
+                      )}
                       <button
                         type="button"
                         onClick={() => handleDeleteInv(inv.slug)}

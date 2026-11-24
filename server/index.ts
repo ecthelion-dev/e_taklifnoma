@@ -16,6 +16,44 @@ const DIST_DIR = path.join(ROOT_DIR, 'dist');
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const SESSION_COOKIE = 'etaklif_session';
+const TELEGRAM_BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
+const TELEGRAM_BOT_USERNAME = (process.env.TELEGRAM_BOT_USERNAME || '').trim().replace(/^@/, '');
+
+async function sendTelegramMessage(chatId: string | number, text: string) {
+  if (!TELEGRAM_BOT_TOKEN || !chatId) return;
+  try {
+    await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+      }),
+    });
+  } catch (err) {
+    console.error('Telegram sendMessage error:', err);
+  }
+}
+
+async function setupTelegramWebhook() {
+  if (!TELEGRAM_BOT_TOKEN) return;
+  const externalUrl = (process.env.RENDER_EXTERNAL_URL || process.env.PUBLIC_URL || '').trim().replace(/\/$/, '');
+  if (!externalUrl) return;
+  const webhookUrl = `${externalUrl}/api/telegram/webhook`;
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: webhookUrl }),
+    });
+    const data = await res.json();
+    console.log('Telegram webhook setup:', data.ok ? webhookUrl : data);
+  } catch (err) {
+    console.error('Telegram webhook setup failed:', err);
+  }
+}
 
 app.set('trust proxy', 1);
 app.use(cors({ origin: true, credentials: true }));
@@ -124,7 +162,10 @@ function serializeInvitation(row: Record<string, unknown>, includeToken = false)
   if (row.rsvp_count !== undefined) base.rsvpCount = Number(row.rsvp_count || 0);
   if (row.going_count !== undefined) base.goingCount = Number(row.going_count || 0);
   if (row.total_guests !== undefined) base.totalGuests = Number(row.total_guests || 0);
-  if (includeToken) base.editToken = row.edit_token;
+  if (includeToken) {
+    base.editToken = row.edit_token;
+    base.telegramConnected = Boolean(row.telegram_chat_id);
+  }
   return base;
 }
 
@@ -141,9 +182,61 @@ async function canManageInvitation(
   return tokens.includes(inv.edit_token) || bodyToken === inv.edit_token || queryToken === inv.edit_token;
 }
 
-// --- Health ---
+// --- Health & Public Config ---
 app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, db: isPostgres ? 'postgres' : 'sqlite', time: new Date().toISOString() });
+  res.json({
+    ok: true,
+    db: isPostgres ? 'postgres' : 'sqlite',
+    telegram: Boolean(TELEGRAM_BOT_TOKEN && TELEGRAM_BOT_USERNAME),
+    time: new Date().toISOString(),
+  });
+});
+
+app.get('/api/config', (_req, res) => {
+  res.json({
+    telegramBotUsername: TELEGRAM_BOT_TOKEN && TELEGRAM_BOT_USERNAME ? TELEGRAM_BOT_USERNAME : null,
+  });
+});
+
+// --- Telegram Bot Webhook ---
+app.post('/api/telegram/webhook', async (req: Request, res: Response) => {
+  res.json({ ok: true });
+  try {
+    const msg = req.body?.message;
+    if (!msg?.chat?.id || typeof msg.text !== 'string') return;
+    const chatId = String(msg.chat.id);
+    const text = msg.text.trim();
+
+    if (text.startsWith('/start')) {
+      const payload = text.split(/\s+/)[1]?.trim();
+      if (payload) {
+        const inv = await db.get<{ id: number; hero_names: string; slug: string; lang: string }>(
+          'SELECT id, hero_names, slug, lang FROM invitations WHERE edit_token = ?',
+          [payload]
+        );
+        if (inv) {
+          await db.run('UPDATE invitations SET telegram_chat_id = ? WHERE id = ?', [chatId, Number(inv.id)]);
+          const confirmText =
+            inv.lang === 'ru'
+              ? `✅ <b>Уведомления подключены!</b>\n\nТеперь все ответы и пожелания со страницы <b>«${escapeHtml(
+                  inv.hero_names
+                )}»</b> будут мгновенно приходить сюда.`
+              : `✅ <b>Bildirishnomalar ulandi!</b>\n\nEndi <b>«${escapeHtml(
+                  inv.hero_names
+                )}»</b> sahifangizga kelgan barcha javob va tilaklar darhol shu yerga yuboriladi.`;
+          await sendTelegramMessage(chatId, confirmText);
+          return;
+        }
+      }
+
+      await sendTelegramMessage(
+        chatId,
+        `👋 <b>eTaklif Bot</b>ga xush kelibsiz!\n\nTaklifnoma yoki sevgi xati yaratib, <b>«Javoblarni Telegramda olish»</b> tugmasini bosing — mehmonlar javobi darhol shu yerga keladi.`
+      );
+    }
+  } catch (err) {
+    console.error('Telegram webhook error:', err);
+  }
 });
 
 // --- Persistent Media Serving (from DB so photos survive Render restarts) ---
@@ -555,7 +648,16 @@ app.get('/api/invitations/:slug/qr', async (req, res) => {
 
 // --- RSVPs ---
 app.post('/api/invitations/:slug/rsvp', async (req, res) => {
-  const inv = await db.get<{ id: number }>('SELECT id FROM invitations WHERE slug = ?', [req.params.slug]);
+  const inv = await db.get<{
+    id: number;
+    hero_names: string;
+    title: string;
+    template_id: string;
+    lang: string;
+    telegram_chat_id: string;
+  }>('SELECT id, hero_names, title, template_id, lang, telegram_chat_id FROM invitations WHERE slug = ?', [
+    req.params.slug,
+  ]);
   if (!inv) {
     res.status(404).json({ error: 'Taklifnoma topilmadi.' });
     return;
@@ -592,6 +694,56 @@ app.post('/api/invitations/:slug/rsvp', async (req, res) => {
      FROM rsvps WHERE id = ?`,
     [Number(inserted!.id)]
   );
+
+  // Send instant Telegram notification to the invitation creator if connected
+  if (inv.telegram_chat_id && TELEGRAM_BOT_TOKEN) {
+    const isPersonal = [
+      'sevgi-maktub',
+      'sevgi-test',
+      'romantik-kecha',
+      'kechirim',
+      'rahmat',
+      'sogindim',
+      'tabrik',
+    ].includes(inv.template_id);
+
+    const statusMapUz: Record<string, string> = {
+      yes: `✅ Albatta boraman (${count} kishi)`,
+      maybe: '🤔 Hali aniq emas',
+      no: '❌ Afsus, bora olmayman',
+    };
+    const statusMapRu: Record<string, string> = {
+      yes: `✅ Обязательно буду (${count} чел.)`,
+      maybe: '🤔 Пока не уверен(а)',
+      no: '❌ К сожалению, не смогу',
+    };
+
+    const lines = [
+      inv.lang === 'ru'
+        ? `💌 <b>Новый ответ!</b> (${escapeHtml(inv.hero_names)})`
+        : `💌 <b>Yangi javob!</b> (${escapeHtml(inv.hero_names)})`,
+      '',
+      `👤 <b>${inv.lang === 'ru' ? 'Имя' : 'Ism'}:</b> ${escapeHtml(String(guestName).trim())}`,
+    ];
+    if (phone && String(phone).trim()) {
+      lines.push(`📞 <b>Tel:</b> ${escapeHtml(String(phone).trim())}`);
+    }
+    if (!isPersonal) {
+      lines.push(
+        `📌 <b>${inv.lang === 'ru' ? 'Статус' : 'Holat'}:</b> ${
+          inv.lang === 'ru' ? statusMapRu[validAttendance] : statusMapUz[validAttendance]
+        }`
+      );
+    }
+    if (parsedScore !== null) {
+      lines.push(`❤️ <b>${inv.lang === 'ru' ? 'Результат теста' : 'Test natijasi'}:</b> ${parsedScore}%`);
+    }
+    if (wishMessage && String(wishMessage).trim()) {
+      lines.push(`💬 <b>${inv.lang === 'ru' ? 'Сообщение' : 'Xabar'}:</b>\n${escapeHtml(String(wishMessage).trim())}`);
+    }
+
+    sendTelegramMessage(inv.telegram_chat_id, lines.join('\n')).catch(() => {});
+  }
 
   res.status(201).json({ rsvp: created });
 });
@@ -730,6 +882,7 @@ initDatabase()
   .then(() => {
     app.listen(PORT, () => {
       console.log(`eTaklif server running at http://localhost:${PORT}`);
+      setupTelegramWebhook();
     });
   })
   .catch((err) => {

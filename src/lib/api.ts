@@ -44,6 +44,7 @@ async function apiFetch<T>(url: string, options: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
+  getConfig: () => apiFetch<{ telegramBotUsername: string | null }>('/api/config'),
   getMe: () => apiFetch<{ user: UserProfile | null }>('/api/auth/me'),
   login: (email: string, password: string) =>
     apiFetch<{ user: UserProfile }>('/api/auth/login', {

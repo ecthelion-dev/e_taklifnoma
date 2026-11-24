@@ -19,6 +19,7 @@ import {
   Send,
   Sparkles,
   LayoutDashboard,
+  Bell,
   X,
 } from 'lucide-react';
 import { Navbar } from '../components/Navbar';
@@ -54,8 +55,17 @@ export const BuilderPage: React.FC = () => {
   const [error, setError] = useState('');
 
   const [publishedSlug, setPublishedSlug] = useState<string | null>(null);
+  const [publishedEditToken, setPublishedEditToken] = useState<string>('');
   const [publishedQr, setPublishedQr] = useState('');
+  const [telegramBot, setTelegramBot] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    api
+      .getConfig()
+      .then((res) => setTelegramBot(res.telegramBotUsername))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (!editSlug) return;
@@ -279,15 +289,19 @@ export const BuilderPage: React.FC = () => {
     setError('');
     try {
       let finalSlug = '';
+      let finalToken = '';
       if (isEditing && editSlug) {
         const res = await api.updateInvitation(editSlug, form);
         finalSlug = res.invitation.slug;
+        finalToken = res.invitation.editToken || '';
       } else {
         const res = await api.createInvitation(form);
         saveEditToken(res.editToken);
         finalSlug = res.invitation.slug;
+        finalToken = res.editToken;
       }
       setPublishedSlug(finalSlug);
+      setPublishedEditToken(finalToken);
       const qrRes = await api.getQr(finalSlug).catch(() => null);
       if (qrRes) setPublishedQr(qrRes.dataUrl);
     } catch (err) {
@@ -994,6 +1008,17 @@ export const BuilderPage: React.FC = () => {
                 <Send className="h-3.5 w-3.5" />
                 {t.publishedModal.shareTelegram}
               </a>
+              {telegramBot && publishedEditToken && (
+                <a
+                  href={`https://t.me/${telegramBot}?start=${encodeURIComponent(publishedEditToken)}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="col-span-2 inline-flex items-center justify-center gap-1.5 rounded-xl bg-amber-100 py-2.5 text-xs font-bold text-amber-950 transition hover:bg-amber-200"
+                >
+                  <Bell className="h-3.5 w-3.5" />
+                  {lang === 'ru' ? 'Получать ответы в Telegram' : 'Javoblarni Telegramda olish'}
+                </a>
+              )}
               <Link
                 to="/dashboard"
                 className="col-span-2 inline-flex items-center justify-center gap-1.5 rounded-xl border border-stone-200 py-2.5 text-xs font-semibold text-stone-700 hover:bg-stone-50"

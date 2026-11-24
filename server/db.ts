@@ -113,10 +113,13 @@ export async function initDatabase() {
         program_json TEXT DEFAULT '[]',
         quiz_json TEXT DEFAULT '[]',
         views_count INTEGER DEFAULT 0,
+        telegram_chat_id TEXT DEFAULT '',
         is_demo INTEGER DEFAULT 0,
         created_at TIMESTAMPTZ DEFAULT NOW(),
         updated_at TIMESTAMPTZ DEFAULT NOW()
       );
+
+      ALTER TABLE invitations ADD COLUMN IF NOT EXISTS telegram_chat_id TEXT DEFAULT '';
 
       CREATE TABLE IF NOT EXISTS rsvps (
         id SERIAL PRIMARY KEY,
@@ -184,6 +187,7 @@ export async function initDatabase() {
         program_json TEXT DEFAULT '[]',
         quiz_json TEXT DEFAULT '[]',
         views_count INTEGER DEFAULT 0,
+        telegram_chat_id TEXT DEFAULT '',
         is_demo INTEGER DEFAULT 0,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT DEFAULT CURRENT_TIMESTAMP,

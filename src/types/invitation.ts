@@ -88,6 +88,7 @@ export interface InvitationData {
   goingCount?: number;
   totalGuests?: number;
   editToken?: string;
+  telegramConnected?: boolean;
   isDemo?: boolean;
   createdAt?: string;
   updatedAt?: string;
