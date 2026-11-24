@@ -7,6 +7,14 @@
     overflow-x: hidden;
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
   }
+
+  a,
+  button:not(:disabled),
+  [role="button"],
+  select,
+  summary {
+    cursor: pointer;
+  }
 }
 
 .font-serif-display {

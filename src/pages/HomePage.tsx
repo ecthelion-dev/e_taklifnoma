@@ -162,8 +162,17 @@ export const HomePage: React.FC = () => {
                           : 'border border-stone-200 bg-white text-stone-600 hover:border-stone-300'
                       }`}
                     >
-                      {lang === 'ru' ? tpl.nameRu.split(' ')[0] : tpl.nameUz.split(' ')[0]}
-                      {tpl.category === 'love' ? ' ❤️' : tpl.category === 'emotions' ? ' 💌' : ''}
+                      {tplId === 'sevgi-maktub'
+                        ? lang === 'ru'
+                          ? 'Письмо ❤️'
+                          : 'Maktub ❤️'
+                        : tplId === 'sevgi-test'
+                          ? lang === 'ru'
+                            ? 'Тест ❤️'
+                            : 'Test ❤️'
+                          : `${lang === 'ru' ? tpl.nameRu.split(' ')[0] : tpl.nameUz.split(' ')[0]}${
+                              tpl.category === 'emotions' ? ' 💌' : ''
+                            }`}
                     </button>
                   );
                 })}
